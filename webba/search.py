@@ -1,7 +1,7 @@
 """webba — ALL search logic"""
 
 from fastcore.all import store_attr, delegates, patch, ifnone, L, AttrDict, merge, first, call_parse, Param
-import niquests, json, os, time, re, random
+import niquests, json, os, time, re, random, atexit
 from pathlib import Path
 from urllib.parse import quote as _url_quote
 
@@ -110,7 +110,8 @@ class QuotaManager:
         "L of provider names with quota > min_remaining AND (key set OR needs_key=False)."
         return L(self.providers.keys()).filter(
             lambda p: self.remaining(p) >= min_remaining and
-                      (not self.providers[p].needs_key or os.environ.get(self.providers[p].env)))
+                      (not self.providers[p].needs_key or os.environ.get(self.providers[p].env)) and
+                      (p != 'searxng' or _searxng_enabled()))
 
 class SearchCache:
     _TBL = 'webba_cache'
@@ -187,9 +188,15 @@ _SEARXNG_URL  = 'http://localhost:8080'
 _SEARXNG_NAME = 'webba-searxng'
 _SEARXNG_DIR  = Path('/tmp/webba-searxng')
 _COMPOSE_PATH = str(_SEARXNG_DIR / 'docker-compose.yml')
+_SEARXNG_OURS = False  # True only when _we_ started the container
+
+def _searxng_enabled():
+    "Check if SearXNG is eligible (WEBBA_SEARXNG != 'false')."
+    return os.environ.get('WEBBA_SEARXNG', 'true').lower() != 'false'
 
 def _ensure_searxng() -> str:
     "Start SearXNG via Compose if not running; write settings.yml; return base URL."
+    global _SEARXNG_OURS
     from dockeasy import Compose, containers
     url = os.environ.get('SEARXNG_URL')
     if url: return url
@@ -203,8 +210,24 @@ def _ensure_searxng() -> str:
              env={'SEARXNG_SECRET': 'webba'},
              container_name=_SEARXNG_NAME)
         .up(detach=True, path=_COMPOSE_PATH))
+    _SEARXNG_OURS = True
     _wait_for_searxng(_SEARXNG_URL)
     return _SEARXNG_URL
+
+def searxng_start() -> str:
+    "Start SearXNG container. Idempotent. Returns base URL."
+    return _ensure_searxng()
+
+def searxng_stop():
+    "Stop SearXNG container if we started it. No-op otherwise."
+    global _SEARXNG_OURS
+    if not _SEARXNG_OURS: return
+    from dockeasy import Compose
+    try: Compose().down(path=_COMPOSE_PATH)
+    except Exception: pass
+    _SEARXNG_OURS = False
+
+atexit.register(searxng_stop)
 
 def _wait_for_searxng(url:str, timeout:int=20, interval:float=0.5):
     "Poll SearXNG / until HTTP 200 or raise RuntimeError on timeout."
@@ -302,6 +325,7 @@ def _ddg(q:str, n:int=10) -> L:
 
 def _searxng(q:str, n:int=10, engines:str=None) -> L:
     "Search via local SearXNG. Auto-starts container via _ensure_searxng() on first call."
+    if not _searxng_enabled(): return L()
     try:
         url = _ensure_searxng()
         params = {'q': q, 'format': 'json', 'pageno': 1}
@@ -424,13 +448,22 @@ def fetch(self:Result, sel:str=None, heavy:bool=False) -> str:
 
 @call_parse
 def _cli(
-    q:          Param("Search query", str)='',
-    n:          Param("Number of results", int)=10,
-    provider:   Param("Provider: auto|serper|tavily|exa|perplexity|brave|ddg|searxng|all", str)='auto',
-    fmt:        Param("Output format: md|json", str)='md',
-    purge_cache:Param("Purge all cached results", bool)=False,
+    q:              Param("Search query", str)='',
+    n:              Param("Number of results", int)=10,
+    provider:       Param("Provider: auto|serper|tavily|exa|perplexity|brave|ddg|searxng|all", str)='auto',
+    fmt:            Param("Output format: md|json", str)='md',
+    purge_cache:    Param("Purge all cached results", bool)=False,
+    start_searxng:  Param("Start SearXNG container", bool)=False,
+    stop_searxng:   Param("Stop SearXNG container", bool)=False,
 ):
     "Search the web from the terminal."
+    if start_searxng:
+        print(f'SearXNG started at {searxng_start()}')
+        return
+    if stop_searxng:
+        searxng_stop()
+        print('SearXNG stopped.')
+        return
     if purge_cache:
         SearchCache().purge()
         print('Cache purged.')
