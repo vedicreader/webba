@@ -5,10 +5,6 @@ import niquests, json, os, time, re, random
 from pathlib import Path
 from urllib.parse import quote as _url_quote
 
-# ---------------------------------------------------------------------------
-# Provider config
-# ---------------------------------------------------------------------------
-
 PROVIDERS = {
     'ddg':           AttrDict(name='ddg',           base=None,
                               free_quota=999999, resets=None, env=None,
@@ -33,10 +29,6 @@ PROVIDERS = {
 
 FREE_TIER_ORDER = ['ddg', 'searxng', 'google_scrape']
 
-# ---------------------------------------------------------------------------
-# Intent routing
-# ---------------------------------------------------------------------------
-
 INTENT = AttrDict(
     academic = ['research', 'paper', 'study', 'arxiv', 'doi', 'journal', 'citation'],
     code     = ['github', 'python', 'javascript', 'stackoverflow', 'npm', 'pypi', 'error', 'bug'],
@@ -56,19 +48,11 @@ INTENT_MAP = AttrDict(
     default  = ['serper', 'tavily', 'ddg', 'searxng'],
 )
 
-# ---------------------------------------------------------------------------
-# Data structures
-# ---------------------------------------------------------------------------
-
 class Result(AttrDict):
     "A single search result. Fields: title, url, snippet, provider, ts (epoch float)."
 
 class SearchResults(L):
     "L of Result objects. Gains .to_md(), .to_context(), .fetch_all() via @patch below."
-
-# ---------------------------------------------------------------------------
-# User-Agent pool (shared with fetch.py via import)
-# ---------------------------------------------------------------------------
 
 _UAS = [
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/122.0.0.0 Safari/537.36',
@@ -78,10 +62,6 @@ _UAS = [
     'Mozilla/5.0 (iPhone; CPU iPhone OS 17_3) AppleWebKit/605.1.15 Version/17.2 Mobile Safari/604.1',
 ]
 def _random_ua() -> dict: return {'User-Agent': random.choice(_UAS)}
-
-# ---------------------------------------------------------------------------
-# QuotaManager
-# ---------------------------------------------------------------------------
 
 class QuotaManager:
     def __init__(self, quota_file:str='~/.webba/quota.json', providers:dict=None):
@@ -112,7 +92,7 @@ class QuotaManager:
         cfg = self.providers[name]
         if not cfg.resets: return
         d = self._data[name]
-        period = 86400 if cfg.resets == 'daily' else 86400 * 30
+        period = 86400 if cfg.resets == 'daily' else 86400 * 30  # ~30 day approximation for monthly
         if time.time() - d['reset_ts'] >= period:
             d['used'], d['reset_ts'] = 0, time.time()
 
@@ -131,10 +111,6 @@ class QuotaManager:
         return L(self.providers.keys()).filter(
             lambda p: self.remaining(p) >= min_remaining and
                       (not self.providers[p].needs_key or os.environ.get(self.providers[p].env)))
-
-# ---------------------------------------------------------------------------
-# SearchCache
-# ---------------------------------------------------------------------------
 
 class SearchCache:
     _TBL = 'webba_cache'
@@ -168,10 +144,6 @@ class SearchCache:
     def purge_expired(self):
         "Remove only entries older than TTL."
         self.db.execute(f'DELETE FROM {self._TBL} WHERE uploaded_at < ?', [time.time() - self.ttl])
-
-# ---------------------------------------------------------------------------
-# SearXNG setup via dockeasy
-# ---------------------------------------------------------------------------
 
 _SEARXNG_SETTINGS = """\
 use_default_settings: true
@@ -242,11 +214,7 @@ def _wait_for_searxng(url:str, timeout:int=20, interval:float=0.5):
             if niquests.get(url, timeout=2).status_code == 200: return
         except Exception: pass
         time.sleep(interval)
-    raise RuntimeError(f'SearXNG did not start within {timeout}s at {url}')
-
-# ---------------------------------------------------------------------------
-# Provider functions — all return L of Result, never raise
-# ---------------------------------------------------------------------------
+    raise RuntimeError(f'SearXNG did not start within {timeout}s at {url}. Check Docker is running.')
 
 def _serper(q:str, n:int=10) -> L:
     "Search via Serper (Google) JSON API. Needs SERPER_API_KEY."
@@ -367,19 +335,11 @@ def _google_scrape(q:str, n:int=10) -> L:
         return results[:n]
     except Exception: return L()
 
-# ---------------------------------------------------------------------------
-# Provider dispatch table
-# ---------------------------------------------------------------------------
-
 _PROVIDER_FNS = {
     'serper': _serper, 'tavily': _tavily, 'exa': _exa,
     'perplexity': _perplexity, 'brave': _brave,
     'ddg': _ddg, 'searxng': _searxng, 'google_scrape': _google_scrape,
 }
-
-# ---------------------------------------------------------------------------
-# Routing
-# ---------------------------------------------------------------------------
 
 def route(q:str, quota:QuotaManager=None) -> str:
     "Pick best available provider for `q` by intent signals, quota, and key availability."
@@ -400,10 +360,6 @@ def route(q:str, quota:QuotaManager=None) -> str:
     if candidates: return candidates[0]
     return 'ddg'
 
-# ---------------------------------------------------------------------------
-# Rerank (RRF)
-# ---------------------------------------------------------------------------
-
 def rerank(results:L, q:str, k:int=60) -> L:
     "RRF merge: score = sum(1/(k+rank)) per URL across providers. Deduplicates by URL."
     scores = {}
@@ -413,10 +369,6 @@ def rerank(results:L, q:str, k:int=60) -> L:
         else: scores[url] = merge(dict(r), {'_rrf': 1.0 / (k + rank)})
     ranked = sorted(scores.values(), key=lambda x: x['_rrf'], reverse=True)
     return L(ranked).map(lambda x: Result(**{k_: v for k_, v in x.items() if k_ != '_rrf'}))
-
-# ---------------------------------------------------------------------------
-# search() — main entry point
-# ---------------------------------------------------------------------------
 
 def search(q:str, n:int=10, provider:str='auto', cache:bool=True,
            quota_file:str='~/.webba/quota.json', cache_ttl:int=3600) -> SearchResults:
@@ -440,10 +392,6 @@ def search(q:str, n:int=10, provider:str='auto', cache:bool=True,
         qm.consume(p)
     if sc: sc.set(key, results)
     return SearchResults(results)
-
-# ---------------------------------------------------------------------------
-# @patch methods on SearchResults and Result
-# ---------------------------------------------------------------------------
 
 @patch
 def to_md(self:SearchResults) -> str:
@@ -473,10 +421,6 @@ def fetch(self:Result, sel:str=None, heavy:bool=False) -> str:
     "Fetch full page content for this result."
     from .fetch import fetch as _fetch
     return _fetch(self.url, sel=sel, heavy=heavy)
-
-# ---------------------------------------------------------------------------
-# CLI
-# ---------------------------------------------------------------------------
 
 @call_parse
 def _cli(

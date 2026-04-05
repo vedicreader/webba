@@ -6,10 +6,6 @@ from selectolax.parser import HTMLParser
 import niquests, re, os, random, time
 from pathlib import Path
 
-# ---------------------------------------------------------------------------
-# User-Agent pool
-# ---------------------------------------------------------------------------
-
 _UAS = [
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/122.0.0.0 Safari/537.36',
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122.0.0.0 Safari/537.36',
@@ -18,10 +14,6 @@ _UAS = [
     'Mozilla/5.0 (iPhone; CPU iPhone OS 17_3) AppleWebKit/605.1.15 Version/17.2 Mobile Safari/604.1',
 ]
 def _random_ua() -> dict: return {'User-Agent': random.choice(_UAS)}
-
-# ---------------------------------------------------------------------------
-# URL type detection
-# ---------------------------------------------------------------------------
 
 _GH_FILE = re.compile(r'https://github\.com/[^/]+/[^/]+/blob/')
 _GH_REPO = re.compile(r'https://github\.com/[^/]+/[^/]+/?$')
@@ -40,10 +32,6 @@ def _url_type(url:str) -> str:
     if _DOCS.search(url):    return 'docs'
     return 'html'
 
-# ---------------------------------------------------------------------------
-# HTML extraction
-# ---------------------------------------------------------------------------
-
 def _extract(html:str, sel:str=None) -> str:
     "Extract clean text from HTML via selectolax. Removes scripts/nav/footer."
     tree = HTMLParser(html)
@@ -51,10 +39,6 @@ def _extract(html:str, sel:str=None) -> str:
     node = (tree.css_first(sel) if sel
             else tree.css_first('main,article,[role=main]') or tree.body)
     return node.text(separator='\n', strip=True) if node else ''
-
-# ---------------------------------------------------------------------------
-# HTML fetch tier cascade
-# ---------------------------------------------------------------------------
 
 @delegates(read_link, but=['url'])
 def _fetch_html(url:str, **kwargs) -> str:
@@ -79,10 +63,6 @@ def _fetch_html(url:str, **kwargs) -> str:
     try: return read_link(url, **kwargs)
     except Exception: return ''
 
-# ---------------------------------------------------------------------------
-# docs llms.txt cascade
-# ---------------------------------------------------------------------------
-
 def _fetch_docs(url:str, sel:str=None) -> str:
     "Try llms-full.txt → llms.txt → plain HTML for documentation URLs."
     base = url.rstrip('/').split('/docs')[0] if '/docs' in url else '/'.join(url.split('/')[:3])
@@ -92,10 +72,6 @@ def _fetch_docs(url:str, sel:str=None) -> str:
             if r.status_code == 200: return r.text
         except Exception: pass
     return _fetch_html(url, sel=sel)
-
-# ---------------------------------------------------------------------------
-# fetch() — main entry point
-# ---------------------------------------------------------------------------
 
 @delegates(read_gh_repo, but=['path_or_url'])
 def fetch(url:str,
