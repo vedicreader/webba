@@ -27,6 +27,8 @@ text = fetch('https://github.com/AnswerDotAI/ContextKit/blob/main/contextkit/rea
 webba "python asyncio" --n 5 --fmt md
 webba "latest AI news" --provider ddg --fmt json
 webba --purge-cache
+webba --start-searxng
+webba --stop-searxng
 ```
 
 ## Features
@@ -49,6 +51,7 @@ webba --purge-cache
 | `PERPLEXITY_API_KEY` | Perplexity Sonar |
 | `BRAVE_API_KEY` | Brave Search |
 | `SEARXNG_URL` | Override auto-started SearXNG |
+| `WEBBA_SEARXNG` | Set to `false` to disable SearXNG entirely (default: `true`) |
 
 ## API
 
@@ -65,6 +68,14 @@ Fetch any URL as clean text/markdown. Handles GitHub files/repos, arxiv, gists, 
 ### `purge_cache(db_path='~/.webba/cache.db')`
 
 Purge all cached search results.
+
+### `searxng_start()`
+
+Start SearXNG container. Idempotent. Returns base URL.
+
+### `searxng_stop()`
+
+Stop SearXNG container if webba started it. No-op otherwise.
 
 ## License
 

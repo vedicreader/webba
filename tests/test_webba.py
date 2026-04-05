@@ -2,7 +2,7 @@ import pytest, time, json
 from pathlib import Path
 from fastcore.all import L
 from webba.search import (Result, SearchResults, QuotaManager, SearchCache,
-                           _ddg, _google_scrape, route, PROVIDERS)
+                           _ddg, _google_scrape, _searxng, _searxng_enabled, route, PROVIDERS)
 from webba.fetch import fetch, _url_type
 
 
@@ -102,3 +102,25 @@ def test_search_results_to_context():
     ])
     ctx = rs.to_context(max_chars=100)
     assert 'Hello world' in ctx
+
+
+def test_searxng_enabled_flag(monkeypatch):
+    monkeypatch.setenv('WEBBA_SEARXNG', 'false')
+    assert not _searxng_enabled()
+    monkeypatch.setenv('WEBBA_SEARXNG', 'true')
+    assert _searxng_enabled()
+    monkeypatch.delenv('WEBBA_SEARXNG', raising=False)
+    assert _searxng_enabled()  # default is enabled
+
+
+def test_searxng_disabled_excludes_from_available(tmp_path, monkeypatch):
+    monkeypatch.setenv('WEBBA_SEARXNG', 'false')
+    for p in PROVIDERS.values():
+        if p.env: monkeypatch.delenv(p.env, raising=False)
+    qm = QuotaManager(quota_file=str(tmp_path/'q.json'))
+    assert 'searxng' not in qm.available()
+
+
+def test_searxng_disabled_returns_empty(monkeypatch):
+    monkeypatch.setenv('WEBBA_SEARXNG', 'false')
+    assert _searxng('test query') == L()
