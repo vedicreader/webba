@@ -28,7 +28,7 @@ def _fmt(results) -> str:
     hermes expects: {"results": [{"title", "url", "description"}, ...]}
     """
     def _get_attr(r, k, d=''):
-        return r.get(k, d) if hasattr(r, 'get') else getattr(r, k, d)
+        return r[k] if isinstance(r, dict) else getattr(r, k, d)
     return json.dumps(
         {"results": [{"title": _get_attr(r, "title"), "url": _get_attr(r, "url"),
                       "description": _get_attr(r, "snippet"), "provider": _get_attr(r, "provider", "webba")}

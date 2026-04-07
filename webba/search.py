@@ -1,7 +1,8 @@
 """webba — ALL search logic"""
 
-from fastcore.all import store_attr, delegates, patch, ifnone, L, AttrDict, merge, first, call_parse, Param
-import niquests, json, os, time, re, random, atexit
+from fastcore.all import store_attr, delegates, patch, ifnone, L, AttrDict, merge, first, call_parse, Param, filter_keys
+from ._utils import _random_ua
+import niquests, json, os, time, re, atexit
 from pathlib import Path
 from urllib.parse import quote as _url_quote
 
@@ -53,15 +54,6 @@ class Result(AttrDict):
 
 class SearchResults(L):
     "L of Result objects. Gains .to_md(), .to_context(), .fetch_all() via @patch below."
-
-_UAS = [
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/122.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (X11; Linux x86_64; rv:123.0) Gecko/20100101 Firefox/123.0',
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_3) AppleWebKit/605.1.15 Version/17.2 Safari/605.1.15',
-    'Mozilla/5.0 (iPhone; CPU iPhone OS 17_3) AppleWebKit/605.1.15 Version/17.2 Mobile Safari/604.1',
-]
-def _random_ua() -> dict: return {'User-Agent': random.choice(_UAS)}
 
 class QuotaManager:
     def __init__(self, quota_file:str='~/.webba/quota.json', providers:dict=None):
@@ -239,80 +231,68 @@ def _wait_for_searxng(url:str, timeout:int=20, interval:float=0.5):
         time.sleep(interval)
     raise RuntimeError(f'SearXNG did not start within {timeout}s at {url}. Check Docker is running.')
 
+def _api_search(env_var:str, req_fn, parse_fn) -> L:
+    "Generic API search: check key → request → parse. Returns L() on any failure."
+    key = os.environ.get(env_var)
+    if not key: return L()
+    try:
+        r = req_fn(key)
+        if r.status_code != 200: return L()
+        return parse_fn(r.json())
+    except Exception: return L()
+
+def _mk_result(provider:str, title_k='title', url_k='url', snippet_k='snippet'):
+    "Return a lambda that builds a Result from a raw API dict."
+    return lambda x: Result(title=x.get(title_k,''), url=x.get(url_k,''),
+                            snippet=x.get(snippet_k,''), provider=provider, ts=time.time())
+
 def _serper(q:str, n:int=10) -> L:
     "Search via Serper (Google) JSON API. Needs SERPER_API_KEY."
-    try:
-        key = os.environ.get('SERPER_API_KEY')
-        if not key: return L()
-        r = niquests.post(PROVIDERS['serper'].base,
-                         headers={'X-API-KEY': key, 'Content-Type': 'application/json'},
-                         json={'q': q, 'num': n}, timeout=10)
-        if r.status_code != 200: return L()
-        return L(r.json().get('organic', [])).map(lambda x: Result(
-            title=x.get('title',''), url=x.get('link',''),
-            snippet=x.get('snippet',''), provider='serper', ts=time.time()))
-    except Exception: return L()
+    return _api_search('SERPER_API_KEY',
+        lambda k: niquests.post(PROVIDERS['serper'].base,
+            headers={'X-API-KEY': k, 'Content-Type': 'application/json'},
+            json={'q': q, 'num': n}, timeout=10),
+        lambda d: L(d.get('organic', [])).map(
+            lambda x: Result(title=x.get('title',''), url=x.get('link',''),
+                             snippet=x.get('snippet',''), provider='serper', ts=time.time())))
 
 def _tavily(q:str, n:int=10) -> L:
     "Search via Tavily research API. Needs TAVILY_API_KEY."
-    try:
-        key = os.environ.get('TAVILY_API_KEY')
-        if not key: return L()
-        r = niquests.post(PROVIDERS['tavily'].base,
-                         json={'api_key': key, 'query': q, 'max_results': n}, timeout=10)
-        if r.status_code != 200: return L()
-        return L(r.json().get('results', [])).map(lambda x: Result(
-            title=x.get('title',''), url=x.get('url',''),
-            snippet=x.get('content',''), provider='tavily', ts=time.time()))
-    except Exception: return L()
+    return _api_search('TAVILY_API_KEY',
+        lambda k: niquests.post(PROVIDERS['tavily'].base,
+            json={'api_key': k, 'query': q, 'max_results': n}, timeout=10),
+        lambda d: L(d.get('results', [])).map(_mk_result('tavily', snippet_k='content')))
 
 def _exa(q:str, n:int=10, semantic:bool=False) -> L:
     "Search via Exa neural API. semantic=True for 'find similar' queries. Needs EXA_API_KEY."
-    try:
-        key = os.environ.get('EXA_API_KEY')
-        if not key: return L()
-        payload = {'query': q, 'numResults': n, 'type': 'neural' if semantic else 'keyword',
-                   'contents': {'text': {'maxCharacters': 300}}}
-        r = niquests.post(PROVIDERS['exa'].base,
-                         headers={'x-api-key': key, 'Content-Type': 'application/json'},
-                         json=payload, timeout=10)
-        if r.status_code != 200: return L()
-        return L(r.json().get('results', [])).map(lambda x: Result(
-            title=x.get('title',''), url=x.get('url',''),
-            snippet=x.get('text',''), provider='exa', ts=time.time()))
-    except Exception: return L()
+    return _api_search('EXA_API_KEY',
+        lambda k: niquests.post(PROVIDERS['exa'].base,
+            headers={'x-api-key': k, 'Content-Type': 'application/json'},
+            json={'query': q, 'numResults': n, 'type': 'neural' if semantic else 'keyword',
+                  'contents': {'text': {'maxCharacters': 300}}}, timeout=10),
+        lambda d: L(d.get('results', [])).map(_mk_result('exa', snippet_k='text')))
 
 def _perplexity(q:str, n:int=10) -> L:
     "Search via Perplexity Sonar. Returns cited answer as single Result. Needs PERPLEXITY_API_KEY."
-    try:
-        key = os.environ.get('PERPLEXITY_API_KEY')
-        if not key: return L()
-        r = niquests.post(PROVIDERS['perplexity'].base,
-                         headers={'Authorization': f'Bearer {key}', 'Content-Type': 'application/json'},
-                         json={'model': 'sonar', 'messages': [{'role': 'user', 'content': q}]},
-                         timeout=30)
-        if r.status_code != 200: return L()
-        data = r.json()
-        content = data.get('choices', [{}])[0].get('message', {}).get('content', '')
-        citations = data.get('citations', [])
+    def _parse(d):
+        content = d.get('choices', [{}])[0].get('message', {}).get('content', '')
         if not content: return L()
-        return L([Result(title=q, url=citations[0] if citations else '',
-                         snippet=content[:500], provider='perplexity', ts=time.time())])
-    except Exception: return L()
+        url = (d.get('citations') or [''])[0]
+        return L([Result(title=q, url=url, snippet=content[:500], provider='perplexity', ts=time.time())])
+    return _api_search('PERPLEXITY_API_KEY',
+        lambda k: niquests.post(PROVIDERS['perplexity'].base,
+            headers={'Authorization': f'Bearer {k}', 'Content-Type': 'application/json'},
+            json={'model': 'sonar', 'messages': [{'role': 'user', 'content': q}]}, timeout=30),
+        _parse)
 
 def _brave(q:str, n:int=10) -> L:
     "Search via Brave Search API. Needs BRAVE_API_KEY."
-    try:
-        key = os.environ.get('BRAVE_API_KEY')
-        if not key: return L()
-        r = niquests.get(PROVIDERS['brave'].base,
-                        headers={'X-Subscription-Token': key, 'Accept': 'application/json'},
-                        params={'q': q, 'count': n}, timeout=10)
-        if r.status_code != 200: return L()
-        return L(r.json().get('web', {}).get('results', [])).map(lambda x: Result(
-            title=x.get('title',''), url=x.get('url',''),
-            snippet=x.get('description',''), provider='brave', ts=time.time()))
-    except Exception: return L()
+    return _api_search('BRAVE_API_KEY',
+        lambda k: niquests.get(PROVIDERS['brave'].base,
+            headers={'X-Subscription-Token': k, 'Accept': 'application/json'},
+            params={'q': q, 'count': n}, timeout=10),
+        lambda d: L(d.get('web', {}).get('results', [])).map(
+            _mk_result('brave', snippet_k='description')))
 
 def _ddg(q:str, n:int=10) -> L:
     "Search via DuckDuckGo (ddgs). Silently returns L() on rate limit — never raises."
@@ -374,9 +354,7 @@ def route(q:str, quota:QuotaManager=None) -> str:
     for intent_name, _ in detected: preferred += L(INTENT_MAP.get(intent_name, []))
     if not preferred: preferred = L(INTENT_MAP.default)
     preferred += L(FREE_TIER_ORDER)
-    seen, deduped = set(), L()
-    for p in preferred:
-        if p not in seen: seen.add(p); deduped.append(p)
+    deduped = L(list(dict.fromkeys(preferred)))
     avail = set(qm.available())
     candidates = deduped.filter(lambda p: p in avail)
     non_fragile = candidates.filter(lambda p: not PROVIDERS[p].fragile)
@@ -392,7 +370,7 @@ def rerank(results:L, q:str, k:int=60) -> L:
         if url in scores: scores[url]['_rrf'] += 1.0 / (k + rank)
         else: scores[url] = merge(dict(r), {'_rrf': 1.0 / (k + rank)})
     ranked = sorted(scores.values(), key=lambda x: x['_rrf'], reverse=True)
-    return L(ranked).map(lambda x: Result(**{k_: v for k_, v in x.items() if k_ != '_rrf'}))
+    return L(ranked).map(lambda x: Result(**filter_keys(x, lambda k: k != '_rrf')))
 
 def search(q:str, n:int=10, provider:str='auto', cache:bool=True,
            quota_file:str='~/.webba/quota.json', cache_ttl:int=3600) -> SearchResults:

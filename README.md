@@ -143,6 +143,17 @@ Start SearXNG container. Idempotent. Returns base URL.
 
 Stop SearXNG container if webba started it. No-op otherwise.
 
+## Architecture
+
+| File | Owns |
+|---|---|
+| `webba/search.py` | Provider functions, quota, cache, routing, CLI |
+| `webba/fetch.py` | URL classification, HTML extraction, fetch cascade |
+| `webba/_utils.py` | Shared helpers (`_random_ua`) |
+| `webba/skill.py` | Skill descriptor (`allow()`), Hermes install CLI |
+| `webba/plugins/__init__.py` | File-based Hermes plugin installer/uninstaller |
+| `webba/plugins/hermes_search.py` | Hermes `register(ctx)` entrypoint, runtime handler |
+
 ## License
 
 Apache-2.0

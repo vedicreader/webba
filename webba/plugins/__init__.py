@@ -1,17 +1,16 @@
 """webba plugins — auto-install helpers for agent harnesses."""
 from __future__ import annotations
-import os, shutil
+import os, shutil, textwrap
 from pathlib import Path
+from fastcore.all import ifnone
 
 __all__ = ['install_hermes_plugin', 'uninstall_hermes_plugin']
 
 
 def _find_hermes_home(hermes_home: str | None = None) -> Path:
-    """Resolve Hermes config/data dir. Order: param → HERMES_HOME env → ~/.hermes"""
-    if hermes_home: return Path(hermes_home).expanduser().resolve()
-    env = os.environ.get('HERMES_HOME')
-    if env: return Path(env).expanduser().resolve()
-    return Path.home() / '.hermes'
+    "Resolve Hermes config/data dir. Order: param → HERMES_HOME env → ~/.hermes"
+    raw = ifnone(hermes_home, os.environ.get('HERMES_HOME')) or str(Path.home() / '.hermes')
+    return Path(raw).expanduser().resolve()
 
 
 def install_hermes_plugin(hermes_home: str | None = None) -> dict:
@@ -31,17 +30,17 @@ def install_hermes_plugin(hermes_home: str | None = None) -> dict:
     try:
         target.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, target / '__init__.py')
-        (target / 'plugin.yaml').write_text(
-            f"name: webba-search\n"
-            f"version: {webba_version}\n"
-            f"description: >\n"
-            f"  webba-powered web_search for Hermes. Zero-config (DDG/SearXNG/Google);\n"
-            f"  upgrades when Serper/Tavily/Exa/Brave/Perplexity keys are set.\n"
-            f"  Gracefully falls back to native hermes web_search_tool on any failure.\n"
-            f"author: vedicreader\n"
-            f"pip_dependencies:\n"
-            f"  - webba\n",
-            encoding='utf-8')
+        (target / 'plugin.yaml').write_text(textwrap.dedent(f"""\
+            name: webba-search
+            version: {webba_version}
+            description: >
+              webba-powered web_search for Hermes. Zero-config (DDG/SearXNG/Google);
+              upgrades when Serper/Tavily/Exa/Brave/Perplexity keys are set.
+              Gracefully falls back to native hermes web_search_tool on any failure.
+            author: vedicreader
+            pip_dependencies:
+              - webba
+            """), encoding='utf-8')
         return dict(installed=True, path=str(target / '__init__.py'),
                     message=f"webba-search plugin installed to {target / '__init__.py'}")
     except Exception as e:

@@ -17,6 +17,9 @@ Fetch any URL as clean markdown/text.
 - cdp: attach to existing Chrome session for login-gated pages (requires webba[cdp])
 - kwargs forwarded to read_gh_repo for repo URLs (branch, as_dict, included_patterns, etc.)
 
+### purge_cache(db_path='~/.webba/cache.db')
+Purge all cached search results from the SQLite cache.
+
 ### quota_status()
 Return remaining free-tier quota for all providers as dict.
 
