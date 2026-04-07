@@ -27,6 +27,10 @@ cdp = ["fastcdp>=0.1"]
 
 [project.scripts]
 webba = "webba.search:_cli"
+webba-install-hermes = "webba.skill:_install_hermes_cli"
+
+[project.entry-points."hermes_agent.plugins"]
+webba-search = "webba.plugins.hermes_search"
 
 [tool.hatch.build.targets.wheel]
 packages = ["webba"]

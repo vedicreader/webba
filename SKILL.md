@@ -20,9 +20,43 @@ Fetch any URL as clean markdown/text.
 ### quota_status()
 Return remaining free-tier quota for all providers as dict.
 
+### install_hermes_plugin(hermes_home=None) -> str
+Install webba as the default web_search backend for Hermes Agent.
+- Copies the plugin to {hermes_home}/plugins/webba/ (default: ~/.hermes/plugins/webba/)
+- hermes_home: override via param, HERMES_HOME env var, or defaults to ~/.hermes
+- Returns JSON: {"installed": true, "path": "...", "message": "..."}
+- Idempotent — safe to call multiple times
+
+### uninstall_hermes_plugin(hermes_home=None) -> str
+Remove the webba-search Hermes plugin directory.
+- Returns JSON: {"uninstalled": true, "path": "...", "message": "..."}
+
+## Hermes Agent Integration
+
+webba registers as a Hermes tool plugin, replacing `web_search` with a cascade:
+
+```
+webba.search(q)  →  results?  ✅
+                 →  empty / raises  →  hermes native web_search_tool(q)  ✅
+                                    →  both fail  →  {"results":[], "error":"..."}
+```
+
+### Install (two ways)
+
+**Option A — pip entry-point (auto, zero steps):**
+`pip install webba` — hermes discovers the plugin automatically on next start.
+
+**Option B — explicit file install (karma-style):**
+```python
+from webba.skill import install_hermes_plugin
+install_hermes_plugin()
+```
+Or via CLI: `webba-install-hermes`
+
 ## Environment Variables (all optional)
 SERPER_API_KEY, TAVILY_API_KEY, EXA_API_KEY, PERPLEXITY_API_KEY, BRAVE_API_KEY
 SEARXNG_URL  — override auto-started localhost SearXNG (for production deployments)
+HERMES_HOME  — override Hermes config dir (default: ~/.hermes)
 
 ## Zero-Key Behaviour
 With no API keys:
@@ -30,3 +64,4 @@ With no API keys:
 2. SearXNG Docker container on localhost:8080 (first call ~3s via Compose.up(), subsequent instant)
    Aggregates: Google, Bing, Brave, DDG, Qwant, arXiv, GitHub, StackOverflow, Google News
 3. Google scrape via niquests + selectolax (fragile, last resort)
+
