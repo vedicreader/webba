@@ -23,7 +23,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-cdp = ["fastcdp>=0.1"]
+cdp = ["fastcdp>=0.0.1"]
 
 [project.scripts]
 webba = "webba.search:_cli"

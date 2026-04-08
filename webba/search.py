@@ -1,6 +1,8 @@
 """webba — ALL search logic"""
 
 from fastcore.all import store_attr, delegates, patch, ifnone, L, AttrDict, merge, first, call_parse, Param, filter_keys
+from fastcore.parallel import parallel as _par
+from litesearch import clean as _lsclean
 from ._utils import _random_ua
 import niquests, json, os, time, re, atexit
 from pathlib import Path
@@ -154,6 +156,7 @@ search:
     - json
 
 server:
+  # local-only dev instance — not for production use
   secret_key: "webba-secret-change-in-prod"
   bind_address: "0.0.0.0:8080"
 
@@ -252,9 +255,7 @@ def _serper(q:str, n:int=10) -> L:
         lambda k: niquests.post(PROVIDERS['serper'].base,
             headers={'X-API-KEY': k, 'Content-Type': 'application/json'},
             json={'q': q, 'num': n}, timeout=10),
-        lambda d: L(d.get('organic', [])).map(
-            lambda x: Result(title=x.get('title',''), url=x.get('link',''),
-                             snippet=x.get('snippet',''), provider='serper', ts=time.time())))
+        lambda d: L(d.get('organic', [])).map(_mk_result('serper', url_k='link')))
 
 def _tavily(q:str, n:int=10) -> L:
     "Search via Tavily research API. Needs TAVILY_API_KEY."
@@ -298,9 +299,7 @@ def _ddg(q:str, n:int=10) -> L:
     "Search via DuckDuckGo (ddgs). Silently returns L() on rate limit — never raises."
     try:
         from duckduckgo_search import DDGS
-        return L(DDGS().text(q, max_results=n)).map(lambda x: Result(
-            title=x.get('title',''), url=x.get('href',''),
-            snippet=x.get('body',''), provider='ddg', ts=time.time()))
+        return L(DDGS().text(q, max_results=n)).map(_mk_result('ddg', url_k='href', snippet_k='body'))
     except Exception: return L()
 
 def _searxng(q:str, n:int=10, engines:str=None) -> L:
@@ -360,21 +359,25 @@ def route(q:str, quota:QuotaManager=None) -> str:
     non_fragile = candidates.filter(lambda p: not PROVIDERS[p].fragile)
     if non_fragile: return non_fragile[0]
     if candidates: return candidates[0]
-    return 'ddg'
+    return first(qm.available()) or 'ddg'
 
-def rerank(results:L, q:str, k:int=60) -> L:
-    "RRF merge: score = sum(1/(k+rank)) per URL across providers. Deduplicates by URL."
+def rerank(results:L, k:int=60) -> L:
+    "RRF merge: per-provider rank scoring. Deduplicates by URL."
+    groups = {}
+    for r in results: groups.setdefault(r.provider, []).append(r)
     scores = {}
-    for rank, r in enumerate(results):
-        url = r.url
-        if url in scores: scores[url]['_rrf'] += 1.0 / (k + rank)
-        else: scores[url] = merge(dict(r), {'_rrf': 1.0 / (k + rank)})
+    for lst in groups.values():
+        for rank, r in enumerate(lst):
+            s = 1.0 / (k + rank)
+            if r.url in scores: scores[r.url]['_rrf'] += s
+            else: scores[r.url] = merge(dict(r), {'_rrf': s})
     ranked = sorted(scores.values(), key=lambda x: x['_rrf'], reverse=True)
     return L(ranked).map(lambda x: Result(**filter_keys(x, lambda k: k != '_rrf')))
 
 def search(q:str, n:int=10, provider:str='auto', cache:bool=True,
            quota_file:str='~/.webba/quota.json', cache_ttl:int=3600) -> SearchResults:
     "Search the web. Smart routing, quota tracking, SQLite cache. Zero API keys needed."
+    if _lsclean(q) is None: return SearchResults()
     qm = QuotaManager(quota_file=quota_file)
     sc = SearchCache(ttl=cache_ttl) if cache else None
     key = f'{provider}:{q}:{n}'
@@ -383,11 +386,12 @@ def search(q:str, n:int=10, provider:str='auto', cache:bool=True,
         if cached is not None:
             return SearchResults(L(cached).map(lambda r: Result(**r) if isinstance(r, dict) else r))
     if provider == 'all':
+        avail = qm.available()
+        provider_results = L(_par(lambda p: (p, _PROVIDER_FNS[p](q, n)), avail, threadpool=True))
+        for p, _ in provider_results: qm.consume(p)
         all_results = L()
-        for p in qm.available():
-            all_results += _PROVIDER_FNS[p](q, n)
-            qm.consume(p)
-        results = rerank(all_results, q)[:n]
+        for _, rs in provider_results: all_results += rs
+        results = rerank(all_results)[:n]
     else:
         p = route(q, quota=qm) if provider == 'auto' else provider
         results = _PROVIDER_FNS[p](q, n)
@@ -414,9 +418,9 @@ def to_context(self:SearchResults, max_chars:int=4000) -> str:
 
 @patch
 def fetch_all(self:SearchResults, sel:str=None, heavy:bool=False) -> L:
-    "Fetch full page content for each URL. Returns L of strings."
-    from .fetch import fetch
-    return L(self).map(lambda r: fetch(r.url, sel=sel, heavy=heavy))
+    "Fetch full page content for each URL in parallel. Returns L of strings."
+    from .fetch import fetch as _fetch
+    return L(_par(lambda r: _fetch(r.url, sel=sel, heavy=heavy), self, threadpool=True))
 
 @patch
 def fetch(self:Result, sel:str=None, heavy:bool=False) -> str:
@@ -450,4 +454,4 @@ def _cli(
         print('Usage: webba "search query" [--n N] [--provider PROV] [--fmt md|json]')
         return
     results = search(q, n=n, provider=provider)
-    print(results.to_md() if fmt == 'md' else json.dumps(list(results), indent=2))
+    print(results.to_md() if fmt == 'md' else json.dumps([dict(r) for r in results], indent=2))
