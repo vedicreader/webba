@@ -37,7 +37,7 @@ webba --stop-searxng
 - **Paid providers**: Serper, Tavily, Exa, Perplexity, Brave — added when API keys are set
 - **Smart routing**: Intent detection routes queries to the best provider
 - **Quota tracking**: Free-tier quota persisted in `~/.webba/quota.json`
-- **SQLite cache**: Never burn quota twice — cached in `~/.webba/cache.db`
+- **Semantic cache**: Paraphrase-tolerant SQLite cache via vector + FTS hybrid search (`~/.webba/cache.db`)
 - **Any-URL fetch**: GitHub files/repos, arxiv, gists, PDFs, docs, HTML → clean text
 - **Tier cascade**: niquests → Jina → playwrightnb → fastcdp for HTML fetching
 - **Hermes Agent plugin**: Drop-in `web_search` replacement with graceful fallback
@@ -151,9 +151,39 @@ Install webba as a Hermes Agent web-search plugin. Returns JSON status dict.
 
 Remove the webba-search Hermes plugin. Returns JSON status dict.
 
-### `purge_cache(db_path='~/.webba/cache.db')`
+### `purge_cache(db_path='~/.webba/cache.db', q=None, ttl_only=False)`
 
-Purge all cached search results.
+Purge cached search results.
+
+- Default (no args): wipe entire cache.
+- `q='my query'`: semantic purge — delete only entries matching the query topic.
+- `ttl_only=True`: delete only entries older than the cache TTL.
+
+### `SemanticSearchCache(db_path='~/.webba/cache.db', ttl=3600, threshold=0.022)`
+
+Low-level cache API. Combines FTS5 and vector search (RRF fusion) for paraphrase-tolerant lookup.
+
+```python
+from webba import search
+from webba.cache import SemanticSearchCache
+
+results = search('python async tutorial', n=5)
+
+sc = SemanticSearchCache(ttl=3600)
+sc.set('python async tutorial', results)   # store with embedding
+sc.get('asyncio python guide')             # semantic hit → returns list
+sc.purge_expired()                         # → int (rows deleted)
+sc.purge_semantic('python async', threshold=0.016)  # → L of deleted rows
+sc.purge_topic('python async')             # → AttrDict(expired, semantic, dry_run)
+```
+
+Embeddings use [`minishlab/potion-base-8M`](https://huggingface.co/minishlab/potion-base-8M) (≈30 MB, lazy-loaded on first use). RRF score thresholds:
+
+| Score | Meaning |
+|---|---|
+| ≥ 0.030 | Near-exact match |
+| ≥ 0.022 | Safe paraphrase hit (default `threshold`) |
+| ≥ 0.016 | Weak match — useful for broad `purge_semantic` sweeps |
 
 ### `searxng_start()`
 
@@ -167,7 +197,8 @@ Stop SearXNG container if webba started it. No-op otherwise.
 
 | File | Owns |
 |---|---|
-| `webba/search.py` | Provider functions, quota, cache, routing, CLI |
+| `webba/search.py` | Provider functions, quota, routing, CLI |
+| `webba/cache.py` | `SemanticSearchCache` — vector + FTS hybrid cache |
 | `webba/fetch.py` | URL classification, HTML extraction, fetch cascade |
 | `webba/_utils.py` | Shared helpers (`_random_ua`) |
 | `webba/skill.py` | Skill descriptor (`allow()`), Hermes install CLI |

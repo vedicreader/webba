@@ -107,38 +107,6 @@ class QuotaManager:
                       (not self.providers[p].needs_key or os.environ.get(self.providers[p].env)) and
                       (p != 'searxng' or _searxng_enabled()))
 
-class SearchCache:
-    _TBL = 'webba_cache'
-    def __init__(self, db_path:str='~/.webba/cache.db', ttl:int=3600):
-        "SQLite cache via litesearch. Content-addressed by query key."
-        store_attr()
-        from litesearch import database
-        self.db = database(Path(db_path).expanduser(), sem_search=False)
-        self.db.execute(f'''CREATE TABLE IF NOT EXISTS {self._TBL}
-            (key TEXT PRIMARY KEY, metadata TEXT, uploaded_at REAL)''')
-
-    def get(self, key:str) -> list|None:
-        "Return cached results if within ttl, else None."
-        rows = list(self.db.query(f'SELECT metadata, uploaded_at FROM {self._TBL} WHERE key = ?', [key]))
-        if not rows: return None
-        row = rows[0]
-        if time.time() - (row.get('uploaded_at') or 0) > self.ttl: return None
-        try: return json.loads(row.get('metadata', '[]'))
-        except Exception: return None
-
-    def set(self, key:str, results:list):
-        "Store results under key with current timestamp."
-        meta = json.dumps([dict(r) for r in results])
-        self.db.execute(f'INSERT OR REPLACE INTO {self._TBL} (key, metadata, uploaded_at) VALUES (?, ?, ?)',
-                       [key, meta, time.time()])
-
-    def purge(self):
-        "Drop all cached results."
-        self.db.execute(f'DELETE FROM {self._TBL}')
-
-    def purge_expired(self):
-        "Remove only entries older than TTL."
-        self.db.execute(f'DELETE FROM {self._TBL} WHERE uploaded_at < ?', [time.time() - self.ttl])
 
 _SEARXNG_SETTINGS = """\
 use_default_settings: true
@@ -376,13 +344,13 @@ def rerank(results:L, k:int=60) -> L:
 
 def search(q:str, n:int=10, provider:str='auto', cache:bool=True,
            quota_file:str='~/.webba/quota.json', cache_ttl:int=3600) -> SearchResults:
-    "Search the web. Smart routing, quota tracking, SQLite cache. Zero API keys needed."
+    "Search the web. Smart routing, quota tracking, semantic SQLite cache. Zero API keys needed."
     if _lsclean(q) is None: return SearchResults()
+    from .cache import SemanticSearchCache
     qm = QuotaManager(quota_file=quota_file)
-    sc = SearchCache(ttl=cache_ttl) if cache else None
-    key = f'{provider}:{q}:{n}'
+    sc = SemanticSearchCache(ttl=cache_ttl) if cache else None
     if sc:
-        cached = sc.get(key)
+        cached = sc.get(q)
         if cached is not None:
             return SearchResults(L(cached).map(lambda r: Result(**r) if isinstance(r, dict) else r))
     if provider == 'all':
@@ -396,7 +364,7 @@ def search(q:str, n:int=10, provider:str='auto', cache:bool=True,
         p = route(q, quota=qm) if provider == 'auto' else provider
         results = _PROVIDER_FNS[p](q, n)
         qm.consume(p)
-    if sc: sc.set(key, results)
+    if sc: sc.set(q, results)
     return SearchResults(results)
 
 @patch
@@ -447,7 +415,8 @@ def _cli(
         print('SearXNG stopped.')
         return
     if purge_cache:
-        SearchCache().purge()
+        from .cache import SemanticSearchCache
+        SemanticSearchCache().purge()
         print('Cache purged.')
         return
     if not q:
