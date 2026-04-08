@@ -35,7 +35,7 @@ def _extract(html:str, sel:str=None) -> str:
 @delegates(read_link, but=['url'])
 def _fetch_html(url:str, **kwargs) -> str:
     "Fetch HTML. Tier cascade: niquests → Jina → contextkit read_link (with same kwargs)."
-    sel = kwargs.get('sel')
+    sel = kwargs.pop('sel', None)
     cdp = kwargs.pop('cdp', False)
     if cdp:
         from fastcdp import fetch as cdp_fetch
@@ -83,8 +83,15 @@ def fetch(url:str,
         import tempfile
         with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as f:
             f.write(niquests.get(url, timeout=30).content); tmp = f.name
-        from contextkit.read import read_pdf
-        return read_pdf(tmp)
+        try:
+            import litesearch  # side-effect: applies pdf_markdown patch onto pdf_oxide.PdfDocument
+            from pdf_oxide import PdfDocument
+            return '\n\n'.join(PdfDocument(tmp).pdf_markdown())
+        except Exception:
+            from contextkit.read import read_pdf
+            return read_pdf(tmp)
+        finally:
+            os.unlink(tmp)
     if t == 'docs':     return _fetch_docs(url, sel=sel)
     if t == 'local':    return Path(url).read_text()
     return _fetch_html(url, sel=sel, heavy=heavy, cdp=cdp)

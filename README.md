@@ -123,6 +123,26 @@ Search the web. Returns `SearchResults` (list of `Result` with `.title`, `.url`,
 
 Fetch any URL as clean text/markdown. Handles GitHub files/repos, arxiv, gists, PDFs, HTML, local files.
 
+### `SearchResults.to_md() -> str`
+
+Format results as a markdown numbered list with title, URL, and snippet.
+
+### `SearchResults.to_context(max_chars=4000) -> str`
+
+Concatenate snippets into an LLM context string, truncated to `max_chars`.
+
+### `SearchResults.fetch_all(sel=None, heavy=False) -> L`
+
+Fetch full page content for each result URL in parallel. Returns `L` of strings.
+
+### `Result.fetch(sel=None, heavy=False) -> str`
+
+Fetch full page content for a single result.
+
+### `quota_status() -> dict`
+
+Return remaining quota for all configured providers.
+
 ### `install_hermes_plugin(hermes_home=None) -> str`
 
 Install webba as a Hermes Agent web-search plugin. Returns JSON status dict.
