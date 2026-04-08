@@ -84,7 +84,7 @@ def fetch(url:str,
         with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as f:
             f.write(niquests.get(url, timeout=30).content); tmp = f.name
         try:
-            import litesearch  # ensures PdfDocument patches (pdf_markdown) are applied
+            import litesearch  # side-effect: applies pdf_markdown patch onto pdf_oxide.PdfDocument
             from pdf_oxide import PdfDocument
             return '\n\n'.join(PdfDocument(tmp).pdf_markdown())
         except Exception:

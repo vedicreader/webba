@@ -227,5 +227,5 @@ def test_route_fallback_to_first_available(monkeypatch, tmp_path):
 def test_search_empty_query():
     "search() returns empty SearchResults for blank query."
     from webba.search import search
-    assert search('') == SearchResults()
-    assert search('   ') == SearchResults()
+    assert len(search('')) == 0
+    assert len(search('   ')) == 0
