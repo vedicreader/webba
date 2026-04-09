@@ -1,8 +1,9 @@
-import pytest, time, json
+import pytest, time, json, numpy as np
 from pathlib import Path
 from fastcore.all import L
-from webba.search import (Result, SearchResults, QuotaManager, SearchCache,
+from webba.search import (Result, SearchResults, QuotaManager,
                            _ddg, _google_scrape, _searxng, _searxng_enabled, route, rerank, PROVIDERS)
+from webba.cache import SemanticSearchCache
 from webba.fetch import fetch, _url_type
 
 
@@ -20,41 +21,84 @@ def test_quota_roundtrip(tmp_path):
     assert qm2.remaining('serper') == 2400
 
 
-def test_cache_set_get(tmp_path):
-    sc = SearchCache(db_path=str(tmp_path/'c.db'), ttl=60)
-    sc.set('test:key', [{'title': 'x', 'url': 'y', 'snippet': 's', 'provider': 'ddg'}])
-    cached = sc.get('test:key')
-    assert cached is not None
-    assert cached[0]['title'] == 'x'
 
+# ── SemanticSearchCache fixtures & tests ──────────────────────────────────────
 
-def test_cache_ttl(tmp_path):
-    sc = SearchCache(db_path=str(tmp_path/'c.db'), ttl=1)
-    sc.set('test', [{'title': 'x', 'url': 'y'}])
-    assert sc.get('test') is not None
-    time.sleep(1.5)
-    assert sc.get('test') is None
+import hashlib
 
+def _fake_emb(self, q:str) -> bytes:
+    "Deterministic fake embedding: hash-seeded random float16 vector (256-dim = potion-base-8M)."
+    seed = int(hashlib.md5(q.encode()).hexdigest()[:8], 16) % (2**31)
+    return np.random.default_rng(seed).random(256).astype(np.float16).tobytes()
 
-def test_cache_purge(tmp_path):
-    sc = SearchCache(db_path=str(tmp_path/'c.db'), ttl=3600)
-    sc.set('k1', [{'title': 'a'}])
-    sc.set('k2', [{'title': 'b'}])
-    assert sc.get('k1') is not None
-    sc.purge()
-    assert sc.get('k1') is None
-    assert sc.get('k2') is None
+@pytest.fixture
+def cache(tmp_path, monkeypatch):
+    sc = SemanticSearchCache(db_path=str(tmp_path/'cache.db'), ttl=5, threshold=0.022)
+    monkeypatch.setattr(SemanticSearchCache, '_emb', _fake_emb)
+    return sc
 
+_RESULTS = [{'title': 'T', 'url': 'https://example.com', 'snippet': 'S', 'provider': 'ddg'}]
 
-def test_cache_purge_expired(tmp_path):
-    sc = SearchCache(db_path=str(tmp_path/'c.db'), ttl=1)
-    sc.set('old', [{'title': 'old'}])
-    time.sleep(1.5)
-    sc.set('new', [{'title': 'new'}])
-    sc.purge_expired()
-    assert sc.get('old') is None
-    assert sc.get('new') is not None
+def test_semantic_hit(cache):
+    "Exact-match query returns cached result (highest possible RRF score)."
+    q = 'python asyncio tutorial'
+    cache.set(q, _RESULTS)
+    hit = cache.get(q)
+    assert hit is not None
+    assert hit[0]['title'] == 'T'
 
+def test_semantic_miss(cache):
+    "Unrelated query scores below threshold and returns None."
+    cache.set('python asyncio tutorial', _RESULTS)
+    assert cache.get('football match scores today') is None
+
+def test_ttl_expiry(cache):
+    "Entry backdated past TTL returns None from get()."
+    q = 'ttl test query'
+    cache.set(q, _RESULTS)
+    cache.db.execute('UPDATE webba_cache SET uploaded_at = ? WHERE content = ?',
+                     [time.time() - cache.ttl - 1, q])
+    assert cache.get(q) is None
+
+def test_purge_expired(cache):
+    "purge_expired() removes only entries older than TTL, leaves fresh ones."
+    cache.set('old entry', _RESULTS)
+    cache.db.execute('UPDATE webba_cache SET uploaded_at = ? WHERE content = ?',
+                     [time.time() - cache.ttl - 1, 'old entry'])
+    cache.set('new entry', _RESULTS)
+    n = cache.purge_expired()
+    assert n == 1
+    assert cache.get('new entry') is not None
+
+def test_purge_semantic(cache):
+    "purge_semantic() deletes matching entries and returns victims."
+    q = 'python asyncio tutorial'
+    cache.set(q, _RESULTS)
+    n_before = len(list(cache.db.query('SELECT rowid FROM webba_cache')))
+    victims = cache.purge_semantic(q, threshold=0.0)
+    assert len(victims) > 0
+    n_after = len(list(cache.db.query('SELECT rowid FROM webba_cache')))
+    assert n_after == n_before - len(victims)
+
+def test_purge_semantic_dry_run(cache):
+    "dry_run=True returns victims without deleting any rows."
+    q = 'python asyncio tutorial'
+    cache.set(q, _RESULTS)
+    n_before = len(list(cache.db.query('SELECT rowid FROM webba_cache')))
+    victims = cache.purge_semantic(q, threshold=0.0, dry_run=True)
+    assert len(victims) > 0
+    n_after = len(list(cache.db.query('SELECT rowid FROM webba_cache')))
+    assert n_after == n_before
+
+def test_purge_topic(cache):
+    "purge_topic() combines expired TTL removal and semantic purge in one call."
+    q = 'python async'
+    cache.set(q, _RESULTS)
+    cache.db.execute('UPDATE webba_cache SET uploaded_at = ?', [time.time() - cache.ttl - 1])
+    result = cache.purge_topic(q, threshold=0.0)
+    assert isinstance(result.expired, int)
+    assert isinstance(result.semantic, L)
+    assert not result.dry_run
 
 def test_quota_available_no_keys(monkeypatch):
     for p in PROVIDERS.values():
@@ -174,16 +218,15 @@ def test_cli_json_serializable():
     assert data[0]['url'] == 'https://example.com'
 
 
-def test_purge_cache_api(tmp_path):
+def test_purge_cache_api(tmp_path, monkeypatch):
     "purge_cache() exported from webba.__init__ clears all cache entries."
     from webba import purge_cache
-    sc = SearchCache(db_path=str(tmp_path/'c.db'))
-    sc.set('k1', [{'title': 'a', 'url': 'u', 'snippet': 's', 'provider': 'ddg'}])
-    assert sc.get('k1') is not None
+    monkeypatch.setattr(SemanticSearchCache, '_emb', _fake_emb)
+    sc = SemanticSearchCache(db_path=str(tmp_path/'c.db'))
+    sc.set('python asyncio', [{'title': 'a', 'url': 'u', 'snippet': 's', 'provider': 'ddg'}])
     purge_cache(db_path=str(tmp_path/'c.db'))
-    # re-open same file to confirm rows are gone
-    sc2 = SearchCache(db_path=str(tmp_path/'c.db'))
-    assert sc2.get('k1') is None
+    sc2 = SemanticSearchCache(db_path=str(tmp_path/'c.db'))
+    assert len(list(sc2.db.query('SELECT rowid FROM webba_cache'))) == 0
 
 
 def test_install_uninstall_hermes_plugin(tmp_path):

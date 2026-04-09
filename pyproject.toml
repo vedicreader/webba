@@ -14,7 +14,8 @@ authors = [{ name = "Karthik Rajgopal" }]
 dependencies = [
     "fastcore>=1.7",
     "niquests>=3.0",
-    "litesearch>=0.0.10",
+    "litesearch>=0.0.14",
+    "model2vec>=0.3",
     "contextkit>=0.0.10",
     "selectolax>=0.3",
     "duckduckgo-search>=6.0",
