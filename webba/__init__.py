@@ -1,6 +1,6 @@
 from .search import search, SearchResults, Result, QuotaManager, route, rerank, PROVIDERS, searxng_start, searxng_stop
 from .cache import SemanticSearchCache
-from .fetch import fetch
+from .fetch import fetch, crawl
 
 __version__ = "0.1.0"
 

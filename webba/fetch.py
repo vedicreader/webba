@@ -6,6 +6,7 @@ from selectolax.parser import HTMLParser
 from ._utils import _random_ua
 import niquests, re, os, time
 from pathlib import Path
+from urllib.parse import urljoin, urlparse
 
 _GH_FILE = re.compile(r'https://github\.com/[^/]+/[^/]+/blob/')
 _GH_REPO = re.compile(r'https://github\.com/[^/]+/[^/]+/?$')
@@ -64,6 +65,41 @@ def _fetch_docs(url:str, sel:str=None) -> str:
             if r.status_code == 200: return r.text
         except Exception: pass
     return _fetch_html(url, sel=sel)
+
+def _links(html:str, base:str, pat:str=None) -> L:
+    "Absolute links from HTML, optionally filtered by regex pattern."
+    hrefs = L(a.attrs.get('href','') for a in HTMLParser(html).css('a[href]'))
+    urls  = L(urljoin(base,h) for h in hrefs if h and not h.startswith(('#','mailto:','javascript:')))
+    return (urls.filter(re.compile(pat).search) if pat else urls).unique()
+
+def crawl(seed:str, link_pat:str=None, sel:str=None,
+          max_pages:int=500, delay:float=0.5, same_domain:bool=True,
+          save_dir:str=None) -> L:
+    "Crawl `seed`, follow links, return L of {url,text} dicts. Saves .txt per page to `save_dir` if given."
+    dom = urlparse(seed).netloc
+    seen, queue, out = set(), [seed], L()
+    if save_dir: Path(save_dir).mkdir(parents=True, exist_ok=True)
+    with niquests.Session() as s:
+        while queue and len(out) < max_pages:
+            url = queue.pop(0)
+            if url in seen: continue
+            seen.add(url)
+            try:
+                r = s.get(url, headers=_random_ua(), timeout=15)
+                if r.status_code != 200 or len(r.text) < 200: continue
+                html = r.text
+            except Exception: continue
+            text = _extract(html, sel)
+            if not text: continue
+            out.append({'url': url, 'text': text})
+            if save_dir:
+                slug = re.sub(r'[^\w-]', '_', urlparse(url).path).strip('_') or 'index'
+                (Path(save_dir)/f'{slug}.txt').write_text(text, encoding='utf-8')
+            new = _links(html, url, link_pat)
+            if same_domain: new = new.filter(lambda u: urlparse(u).netloc == dom)
+            queue += [u for u in new if u not in seen]
+            if queue: time.sleep(delay)
+    return out
 
 @delegates(read_gh_repo, but=['path_or_url'])
 def fetch(url:str,
