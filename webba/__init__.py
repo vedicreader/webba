@@ -1,4 +1,4 @@
-from .search import search, SearchResults, Result, QuotaManager, route, rerank, PROVIDERS, searxng_start, searxng_stop
+from .search import search, SearchResults, Result, QuotaManager, ProviderHealth, QueryAnalyzer, route, rerank, PROVIDERS, SEARXNG_CATEGORY_MAP, searxng_start, searxng_stop
 from .cache import SemanticSearchCache
 from .fetch import fetch, crawl
 

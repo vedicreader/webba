@@ -142,7 +142,7 @@ def test_search_results_to_md():
 def test_route_intent(tmp_path):
     "Verify route detects intent and picks appropriate provider."
     qm = QuotaManager(quota_file=str(tmp_path/'q.json'))
-    p = route('python github error', quota=qm)
+    p, intent, extras = route('python github error', quota=qm)
     assert p in ('ddg', 'searxng', 'serper', 'exa')
 
 
@@ -263,7 +263,7 @@ def test_route_fallback_to_first_available(monkeypatch, tmp_path):
     qm = QuotaManager(quota_file=str(tmp_path/'q.json'))
     # mock available() to return only 'brave' — not in any default preferred list
     monkeypatch.setattr(qm, 'available', lambda min_remaining=1: L(['brave']))
-    p = route('generic query', quota=qm)
+    p, intent, extras = route('generic query', quota=qm)
     assert p == 'brave'
 
 
