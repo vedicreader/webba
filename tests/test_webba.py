@@ -142,7 +142,7 @@ def test_search_results_to_md():
 def test_route_intent(tmp_path):
     "Verify route detects intent and picks appropriate provider."
     qm = QuotaManager(quota_file=str(tmp_path/'q.json'))
-    p = route('python github error', quota=qm)
+    p, intent, extras = route('python github error', quota=qm)
     assert p in ('ddg', 'searxng', 'serper', 'exa')
 
 
@@ -263,7 +263,7 @@ def test_route_fallback_to_first_available(monkeypatch, tmp_path):
     qm = QuotaManager(quota_file=str(tmp_path/'q.json'))
     # mock available() to return only 'brave' — not in any default preferred list
     monkeypatch.setattr(qm, 'available', lambda min_remaining=1: L(['brave']))
-    p = route('generic query', quota=qm)
+    p, intent, extras = route('generic query', quota=qm)
     assert p == 'brave'
 
 
@@ -272,3 +272,37 @@ def test_search_empty_query():
     from webba.search import search
     assert len(search('')) == 0
     assert len(search('   ')) == 0
+
+
+# ── crawl tests ───────────────────────────────────────────────────────────────
+
+from webba.fetch import _links, crawl
+
+def test_links_absolute():
+    html = '<a href="/page1">p1</a><a href="https://other.com/x">ext</a><a href="#skip">s</a>'
+    result = _links(html, 'https://example.com')
+    assert 'https://example.com/page1' in result
+    assert 'https://other.com/x' in result
+    assert not any('#' in u for u in result)
+
+def test_links_pattern():
+    html = '<a href="/sarga/1">s1</a><a href="/sarga/2">s2</a><a href="/about">about</a>'
+    result = _links(html, 'https://site.com', pat=r'/sarga/')
+    assert len(result) == 2 and all('sarga' in u for u in result)
+
+def test_crawl_saves_files(tmp_path):
+    "crawl() with save_dir writes one .txt file per page fetched."
+    import unittest.mock as mock
+    index_html  = '<a href="/p1">link</a><main>' + 'Index page content. ' * 15 + '</main>'
+    page1_html  = '<main>' + 'Page one sarga content text. ' * 15 + '</main>'
+    def fake_get(url, **kw):
+        r = mock.MagicMock()
+        r.status_code = 200
+        r.text = index_html if url.endswith('/') else page1_html
+        return r
+    with mock.patch('niquests.Session') as MockSession:
+        MockSession.return_value.__enter__.return_value.get.side_effect = fake_get
+        results = crawl('https://site.com/', max_pages=5, delay=0, save_dir=str(tmp_path))
+    assert len(results) >= 1
+    assert all('url' in r and 'text' in r for r in results)
+    assert any(tmp_path.iterdir())  # at least one .txt file written

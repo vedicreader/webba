@@ -4,7 +4,7 @@ from fastcore.all import store_attr, delegates, patch, ifnone, L, AttrDict, merg
 from fastcore.parallel import parallel as _par
 from litesearch import clean as _lsclean
 from ._utils import _random_ua
-import niquests, json, os, time, re, atexit
+import niquests, json, os, time, re, atexit, hashlib
 from pathlib import Path
 from urllib.parse import quote as _url_quote
 
@@ -31,6 +31,14 @@ PROVIDERS = {
 }
 
 FREE_TIER_ORDER = ['ddg', 'searxng', 'google_scrape']
+
+SEARXNG_CATEGORY_MAP = {
+    'recent':   'news',
+    'academic': 'science',
+    'code':     'it',
+    'shopping': 'shopping',
+    'default':  'general',
+}
 
 INTENT = AttrDict(
     academic = ['research', 'paper', 'study', 'arxiv', 'doi', 'journal', 'citation'],
@@ -106,6 +114,113 @@ class QuotaManager:
             lambda p: self.remaining(p) >= min_remaining and
                       (not self.providers[p].needs_key or os.environ.get(self.providers[p].env)) and
                       (p != 'searxng' or _searxng_enabled()))
+
+
+class ProviderHealth:
+    "Progressive cooldown tracker for search providers. Persists to health.json."
+    COOLDOWNS = [60, 300, 1500, 3600]  # 1m → 5m → 25m → 1h
+    FATAL     = {401, 403}
+    TRANSIENT = {429, 502, 503, 504}
+
+    def __init__(self, health_file:str='~/.webba/health.json'):
+        store_attr()
+        self._data = {}
+        self._load()
+
+    def _load(self):
+        p = Path(self.health_file).expanduser()
+        if p.exists():
+            try: self._data = json.loads(p.read_text())
+            except Exception: pass
+
+    def _save(self):
+        p = Path(self.health_file).expanduser()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_suffix('.tmp')
+        tmp.write_text(json.dumps(self._data, indent=2))
+        tmp.rename(p)
+
+    def record_failure(self, provider:str, status_code:int):
+        "Escalate cooldown level; persist."
+        d = self._data.setdefault(provider, {'failures': 0, 'cooldown_until': 0, 'level': 0})
+        if status_code in self.FATAL: d['level'] = len(self.COOLDOWNS) - 1
+        else: d['level'] = min(d.get('level', 0) + 1, len(self.COOLDOWNS) - 1)
+        d['failures'] = d.get('failures', 0) + 1
+        d['cooldown_until'] = time.time() + self.COOLDOWNS[d['level']]
+        self._save()
+
+    def record_success(self, provider:str):
+        "Reset cooldown level on success."
+        if provider in self._data:
+            self._data[provider]['level'] = 0
+            self._save()
+
+    def is_available(self, provider:str) -> bool:
+        "True if provider is not in active cooldown."
+        d = self._data.get(provider)
+        return not d or time.time() > d.get('cooldown_until', 0)
+
+
+_health_singleton = None
+
+def _get_health() -> ProviderHealth:
+    global _health_singleton
+    if _health_singleton is None: _health_singleton = ProviderHealth()
+    return _health_singleton
+
+
+class QueryAnalyzer:
+    "Signal-weighted intent classifier. Returns (intent, providers, confidence, extras)."
+    _INTENTS = {
+        'academic': (['research', 'paper', 'study', 'arxiv', 'doi', 'journal', 'citation',
+                      'how does', 'why is', 'define', 'explain', 'mechanism', 'overview'],
+                     ['exa', 'perplexity', 'tavily', 'searxng']),
+        'code':     (['github', 'python', 'javascript', 'stackoverflow', 'npm', 'pypi',
+                      'error', 'bug', 'library', 'framework', 'repo'],
+                     ['serper', 'exa', 'ddg', 'searxng']),
+        'recent':   (['today', 'yesterday', 'this week', 'latest', 'breaking', 'current',
+                      'live', 'just announced', '2025', '2026'],
+                     ['serper', 'brave', 'ddg', 'searxng']),
+        'shopping': (['buy', 'price', 'review', 'vs', 'best', 'cheap', 'deal',
+                      'cost', 'coupon', 'discount', 'compare'],
+                     ['serper', 'tavily', 'ddg']),
+        'local':    (['near me', 'nearby', 'restaurant', 'hotel', 'open now'],
+                     ['serper', 'ddg']),
+        'semantic': (['similar to', 'like this', 'related to', 'find me',
+                      'alternatives', 'companies like', 'benchmark'],
+                     ['exa', 'tavily']),
+    }
+
+    def analyze(self, q:str) -> tuple:
+        "Return (intent, providers, confidence, extras)."
+        ql = q.lower()
+        scores = {intent: sum(1 for pat in pats if pat in ql)
+                  for intent, (pats, _) in self._INTENTS.items()}
+        sorted_s = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+        top_intent, top_score = sorted_s[0]
+        second_score = sorted_s[1][1] if len(sorted_s) > 1 else 0
+
+        if top_score == 0:
+            return 'default', list(INTENT_MAP.default), 0.0, {}
+
+        max_pats   = max(len(pats) for pats, _ in self._INTENTS.values())
+        abs_conf   = top_score / max_pats
+        margin     = (top_score - second_score) / max(top_score, 1)
+        confidence = 0.6 * abs_conf + 0.4 * margin
+
+        if confidence < 0.3:
+            tied = sorted(i for i, s in scores.items() if s == top_score)
+            if len(tied) > 1:
+                idx = int(hashlib.sha256(f"{q}|{'|'.join(tied)}".encode()).hexdigest(), 16) % len(tied)
+                top_intent = tied[idx]
+
+        providers = list(self._INTENTS.get(top_intent, ([], list(INTENT_MAP.default)))[1])
+
+        extras = {}
+        if top_intent in ('academic', 'semantic'):
+            extras['exa_depth'] = 'deep-reasoning' if top_score >= 6 else ('deep' if top_score >= 4 else 'normal')
+
+        return top_intent, providers, confidence, extras
 
 
 _SEARXNG_SETTINGS = """\
@@ -202,15 +317,20 @@ def _wait_for_searxng(url:str, timeout:int=20, interval:float=0.5):
         time.sleep(interval)
     raise RuntimeError(f'SearXNG did not start within {timeout}s at {url}. Check Docker is running.')
 
-def _api_search(env_var:str, req_fn, parse_fn) -> L:
-    "Generic API search: check key → request → parse. Returns L() on any failure."
+def _api_search(env_var:str, req_fn, parse_fn, provider:str=None) -> L:
+    "Generic API search: check key → request → parse. Records health on failure/success."
     key = os.environ.get(env_var)
     if not key: return L()
     try:
         r = req_fn(key)
-        if r.status_code != 200: return L()
+        if r.status_code != 200:
+            if provider: _get_health().record_failure(provider, r.status_code)
+            return L()
+        if provider: _get_health().record_success(provider)
         return parse_fn(r.json())
-    except Exception: return L()
+    except Exception:
+        if provider: _get_health().record_failure(provider, 0)
+        return L()
 
 def _mk_result(provider:str, title_k='title', url_k='url', snippet_k='snippet'):
     "Return a lambda that builds a Result from a raw API dict."
@@ -223,23 +343,27 @@ def _serper(q:str, n:int=10) -> L:
         lambda k: niquests.post(PROVIDERS['serper'].base,
             headers={'X-API-KEY': k, 'Content-Type': 'application/json'},
             json={'q': q, 'num': n}, timeout=10),
-        lambda d: L(d.get('organic', [])).map(_mk_result('serper', url_k='link')))
+        lambda d: L(d.get('organic', [])).map(_mk_result('serper', url_k='link')),
+        provider='serper')
 
 def _tavily(q:str, n:int=10) -> L:
     "Search via Tavily research API. Needs TAVILY_API_KEY."
     return _api_search('TAVILY_API_KEY',
         lambda k: niquests.post(PROVIDERS['tavily'].base,
             json={'api_key': k, 'query': q, 'max_results': n}, timeout=10),
-        lambda d: L(d.get('results', [])).map(_mk_result('tavily', snippet_k='content')))
+        lambda d: L(d.get('results', [])).map(_mk_result('tavily', snippet_k='content')),
+        provider='tavily')
 
-def _exa(q:str, n:int=10, semantic:bool=False) -> L:
-    "Search via Exa neural API. semantic=True for 'find similar' queries. Needs EXA_API_KEY."
+def _exa(q:str, n:int=10, semantic:bool=False, depth:str='normal') -> L:
+    "Search via Exa neural API. depth: 'normal'|'deep'|'deep-reasoning'. Needs EXA_API_KEY."
+    use_neural = semantic or depth != 'normal'
     return _api_search('EXA_API_KEY',
         lambda k: niquests.post(PROVIDERS['exa'].base,
             headers={'x-api-key': k, 'Content-Type': 'application/json'},
-            json={'query': q, 'numResults': n, 'type': 'neural' if semantic else 'keyword',
+            json={'query': q, 'numResults': n, 'type': 'neural' if use_neural else 'keyword',
                   'contents': {'text': {'maxCharacters': 300}}}, timeout=10),
-        lambda d: L(d.get('results', [])).map(_mk_result('exa', snippet_k='text')))
+        lambda d: L(d.get('results', [])).map(_mk_result('exa', snippet_k='text')),
+        provider='exa')
 
 def _perplexity(q:str, n:int=10) -> L:
     "Search via Perplexity Sonar. Returns cited answer as single Result. Needs PERPLEXITY_API_KEY."
@@ -252,7 +376,7 @@ def _perplexity(q:str, n:int=10) -> L:
         lambda k: niquests.post(PROVIDERS['perplexity'].base,
             headers={'Authorization': f'Bearer {k}', 'Content-Type': 'application/json'},
             json={'model': 'sonar', 'messages': [{'role': 'user', 'content': q}]}, timeout=30),
-        _parse)
+        _parse, provider='perplexity')
 
 def _brave(q:str, n:int=10) -> L:
     "Search via Brave Search API. Needs BRAVE_API_KEY."
@@ -261,7 +385,8 @@ def _brave(q:str, n:int=10) -> L:
             headers={'X-Subscription-Token': k, 'Accept': 'application/json'},
             params={'q': q, 'count': n}, timeout=10),
         lambda d: L(d.get('web', {}).get('results', [])).map(
-            _mk_result('brave', snippet_k='description')))
+            _mk_result('brave', snippet_k='description')),
+        provider='brave')
 
 def _ddg(q:str, n:int=10) -> L:
     "Search via DuckDuckGo (ddgs). Silently returns L() on rate limit — never raises."
@@ -270,13 +395,14 @@ def _ddg(q:str, n:int=10) -> L:
         return L(DDGS().text(q, max_results=n)).map(_mk_result('ddg', url_k='href', snippet_k='body'))
     except Exception: return L()
 
-def _searxng(q:str, n:int=10, engines:str=None) -> L:
-    "Search via local SearXNG. Auto-starts container via _ensure_searxng() on first call."
+def _searxng(q:str, n:int=10, engines:str=None, category:str=None) -> L:
+    "Search via local SearXNG. category maps to SearXNG categories (news/science/it/shopping/general)."
     if not _searxng_enabled(): return L()
     try:
         url = _ensure_searxng()
         params = {'q': q, 'format': 'json', 'pageno': 1}
-        if engines: params['engines'] = engines
+        if engines:  params['engines']    = engines
+        if category: params['categories'] = category
         r = niquests.get(f'{url}/search', params=params, timeout=15)
         if r.status_code != 200: return L()
         return L(r.json().get('results', [])[:n]).map(lambda x: Result(
@@ -312,22 +438,17 @@ _PROVIDER_FNS = {
     'ddg': _ddg, 'searxng': _searxng, 'google_scrape': _google_scrape,
 }
 
-def route(q:str, quota:QuotaManager=None) -> str:
-    "Pick best available provider for `q` by intent signals, quota, and key availability."
+def route(q:str, quota:QuotaManager=None, health:ProviderHealth=None) -> tuple:
+    "Pick best available provider. Returns (provider, intent, extras)."
     qm = ifnone(quota, QuotaManager())
-    ql = q.lower()
-    detected = L(INTENT.items()).filter(lambda kv: any(s in ql for s in kv[1]))
-    preferred = L()
-    for intent_name, _ in detected: preferred += L(INTENT_MAP.get(intent_name, []))
-    if not preferred: preferred = L(INTENT_MAP.default)
-    preferred += L(FREE_TIER_ORDER)
-    deduped = L(list(dict.fromkeys(preferred)))
+    hp = ifnone(health, _get_health())
+    intent, preferred, _conf, extras = QueryAnalyzer().analyze(q)
+    ordered = list(dict.fromkeys(preferred + FREE_TIER_ORDER))
     avail = set(qm.available())
-    candidates = deduped.filter(lambda p: p in avail)
-    non_fragile = candidates.filter(lambda p: not PROVIDERS[p].fragile)
-    if non_fragile: return non_fragile[0]
-    if candidates: return candidates[0]
-    return first(qm.available()) or 'ddg'
+    candidates = [p for p in ordered if p in avail and hp.is_available(p)]
+    non_fragile = [p for p in candidates if not PROVIDERS[p].fragile]
+    chosen = (non_fragile or candidates or [first(qm.available()) or 'ddg'])[0]
+    return chosen, intent, extras
 
 def rerank(results:L, k:int=60) -> L:
     "RRF merge: per-provider rank scoring. Deduplicates by URL."
@@ -353,6 +474,7 @@ def search(q:str, n:int=10, provider:str='auto', cache:bool=True,
         cached = sc.get(q)
         if cached is not None:
             return SearchResults(L(cached).map(lambda r: Result(**r) if isinstance(r, dict) else r))
+    hp = _get_health()
     if provider == 'all':
         avail = qm.available()
         provider_results = L(_par(lambda p: (p, _PROVIDER_FNS[p](q, n)), avail, threadpool=True))
@@ -361,8 +483,16 @@ def search(q:str, n:int=10, provider:str='auto', cache:bool=True,
         for _, rs in provider_results: all_results += rs
         results = rerank(all_results)[:n]
     else:
-        p = route(q, quota=qm) if provider == 'auto' else provider
-        results = _PROVIDER_FNS[p](q, n)
+        if provider == 'auto':
+            p, intent, extras = route(q, quota=qm, health=hp)
+        else:
+            p, intent, extras = provider, 'default', {}
+        if p == 'searxng':
+            results = _searxng(q, n, category=SEARXNG_CATEGORY_MAP.get(intent, 'general'))
+        elif p == 'exa' and extras.get('exa_depth'):
+            results = _exa(q, n, depth=extras['exa_depth'])
+        else:
+            results = _PROVIDER_FNS[p](q, n)
         qm.consume(p)
     if sc: sc.set(q, results)
     return SearchResults(results)

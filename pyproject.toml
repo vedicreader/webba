@@ -38,3 +38,6 @@ packages = ["webba"]
 
 [tool.uv]
 dev-dependencies = ["pytest>=8.0"]
+
+[tool.pytest.ini_options]
+markers = ["integration: hits real network (run with pytest -m integration)"]
