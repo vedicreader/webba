@@ -243,6 +243,16 @@ server:
   secret_key: "webba-secret-change-in-prod"
   bind_address: "0.0.0.0:8080"
 
+# hostname 'redis' resolves via Docker network
+redis:
+  url: redis://redis:6379/0
+
+outgoing:
+  request_timeout: 3.0
+  max_request_timeout: 10.0
+  pool_maxsize: 20
+  enable_http2: true
+
 engines:
   - {name: google,      engine: google,      shortcut: g,   weight: 2.0}
   - {name: bing,        engine: bing,        shortcut: b,   weight: 1.5}
@@ -262,9 +272,10 @@ engines:
   - {name: ask,    engine: ask,    disabled: true}
 """
 
-_SEARXNG_URL  = 'http://localhost:8080'
-_SEARXNG_NAME = 'webba-searxng'
-_SEARXNG_DIR  = Path('/tmp/webba-searxng')
+_SEARXNG_URL     = 'http://localhost:8080'
+_SEARXNG_NAME    = 'webba-searxng'
+_SEARXNG_NETWORK = 'webba-net'
+_SEARXNG_DIR     = Path('/tmp/webba-searxng')
 _COMPOSE_PATH = str(_SEARXNG_DIR / 'docker-compose.yml')
 _SEARXNG_OURS = False  # True only when _we_ started the container
 
@@ -273,20 +284,28 @@ def _searxng_enabled():
     return os.environ.get('WEBBA_SEARXNG', 'true').lower() != 'false'
 
 def _ensure_searxng() -> str:
-    "Start SearXNG via Compose if not running; write settings.yml; return base URL."
+    "Start SearXNG + Redis via Compose if not running; write settings.yml; return base URL."
     global _SEARXNG_OURS
-    from dockeasy import Compose, containers
+    from dockeasy import Compose
     url = os.environ.get('SEARXNG_URL')
     if url: return url
     _SEARXNG_DIR.mkdir(parents=True, exist_ok=True)
     (_SEARXNG_DIR / 'settings.yml').write_text(_SEARXNG_SETTINGS)
     (Compose()
+        .network(_SEARXNG_NETWORK)
+        .svc('redis',
+             image='redis:7-alpine',
+             command='redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru --save ""',
+             networks=[_SEARXNG_NETWORK],
+             restart='unless-stopped')
         .svc('searxng',
              image='searxng/searxng:latest',
              ports={'8080': '8080'},
              volumes={str(_SEARXNG_DIR): '/etc/searxng'},
              env={'SEARXNG_SECRET': 'webba'},
-             container_name=_SEARXNG_NAME)
+             container_name=_SEARXNG_NAME,
+             depends_on=['redis'],
+             networks=[_SEARXNG_NETWORK])
         .up(detach=True, path=_COMPOSE_PATH))
     _SEARXNG_OURS = True
     _wait_for_searxng(_SEARXNG_URL)
